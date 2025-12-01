@@ -1,0 +1,105 @@
+name: Automated Vulnerability Scan & Remediation
+
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: "vulnerables/web-dvwa:latest"
+  ECR_URL: "654654254513.dkr.ecr.us-east-1.amazonaws.com/api-service"
+  AWS_REGION: "ap-south-1"
+  TFC_WORKSPACE_ID: "ws-bXE1FijLn2qRyHtJ"
+  ORG_NAME: "remediation"
+  TEMPLATE_DIR: "terraform"
+
+permissions:
+  contents: write
+
+jobs:
+
+  # ---------------------------------------------------
+  # 1️⃣ SCAN + SEND EMAIL + WAIT FOR APPROVAL
+  # ---------------------------------------------------
+  scan_and_wait:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: approval
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install wget -y
+          wget -qO- https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb stable main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -y
+          sudo apt-get install trivy -y
+
+      - name: Run Trivy Scan
+        run: |
+          chmod +x scripts/trivy_scan.sh
+          bash scripts/trivy_scan.sh $IMAGE_NAME
+
+      - name: Check for High/Critical
+        id: vulncheck
+        run: |
+          if grep -q "CRITICAL\|HIGH" scan-reports/*.txt; then
+            echo "found=true" >> $GITHUB_ENV
+          else
+            echo "found=false" >> $GITHUB_ENV
+          fi
+
+      - name: Send Approval Email
+        if: env.found == 'true'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "⚠️ Vulnerabilities Found – Approval Required"
+          to: ${{ secrets.SMTP_USERNAME }}
+          from: "AutoRemediation Bot"
+          body: |
+            HIGH/CRITICAL vulnerabilities detected in image: ${{ env.IMAGE_NAME }}
+
+            Click to Approve or Reject:
+            https://github.com/${{ github.repository }}/deployments
+
+      - name: Await Approval
+        if: env.found == 'true'
+        uses: trstringer/manual-approval@v1
+        with:
+          approvers: ${{ secrets.SMTP_USERNAME }}
+          minimum-approvals: 1
+
+      - name: Set decision output
+        id: decision
+        run: echo "result=approved" >> $GITHUB_OUTPUT
+
+
+  # ---------------------------------------------------
+  # 2️⃣ REMEDIATION + TERRAFORM + ECR DEPLOY
+  # ---------------------------------------------------
+  remediate_or_skip:
+    needs: scan_and_wait
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Remediation
+        if: needs.scan_and_wait.outputs.result == 'approved'
+        run: |
+          chmod +x scripts/remediation.sh
+          bash scripts/remediation.sh $IMAGE_NAME $ECR_URL
+
+      - name: Trigger Terraform Cloud
+        if: needs.scan_and_wait.outputs.result == 'approved'
+        run: |
+          chmod +x scripts/terraform_trigger.sh
+          bash scripts/terraform_trigger.sh
