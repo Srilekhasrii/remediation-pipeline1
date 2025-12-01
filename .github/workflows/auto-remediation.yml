@@ -16,14 +16,11 @@ permissions:
 
 jobs:
 
-  # ---------------------------------------------------
-  # 1️⃣ SCAN + SEND EMAIL + WAIT FOR APPROVAL
-  # ---------------------------------------------------
   scan_and_wait:
     runs-on: ubuntu-latest
 
-    environment:
-      name: approval
+    outputs:
+      result: ${{ steps.decision.outputs.result }}
 
     steps:
       - name: Checkout code
@@ -61,19 +58,19 @@ jobs:
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
           subject: "⚠️ Vulnerabilities Found – Approval Required"
-          to: ${{ secrets.SMTP_USERNAME }}
-          from: "AutoRemediation Bot"
+          to: ${{ secrets.SMTP_TO }}
+          from: ${{ secrets.SMTP_USERNAME }}
           body: |
             HIGH/CRITICAL vulnerabilities detected in image: ${{ env.IMAGE_NAME }}
 
-            Click to Approve or Reject:
+            Click to Approve:
             https://github.com/${{ github.repository }}/deployments
 
       - name: Await Approval
         if: env.found == 'true'
         uses: trstringer/manual-approval@v1
         with:
-          approvers: ${{ secrets.SMTP_USERNAME }}
+          approvers: ${{ secrets.SMTP_TO }}
           minimum-approvals: 1
 
       - name: Set decision output
@@ -81,9 +78,6 @@ jobs:
         run: echo "result=approved" >> $GITHUB_OUTPUT
 
 
-  # ---------------------------------------------------
-  # 2️⃣ REMEDIATION + TERRAFORM + ECR DEPLOY
-  # ---------------------------------------------------
   remediate_or_skip:
     needs: scan_and_wait
     runs-on: ubuntu-latest
